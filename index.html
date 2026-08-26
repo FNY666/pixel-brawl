@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>像素乱斗 PIXEL BRAWL</title>
+<meta name="theme-color" content="#0a1024">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="像素乱斗">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="stylesheet" href="style.css?v=11">
+</head>
+<body>
+<div id="wrap">
+  <canvas id="cv" width="480" height="270"></canvas>
+
+  <!-- 标题画面 -->
+  <div id="title" class="panel">
+    <h1>像素乱斗</h1>
+    <p class="sub">PIXEL BRAWL · 复古格斗</p>
+    <button id="btn-start">开始战斗</button>
+    <button id="btn-arcade" class="btn-alt">街机模式</button>
+    <button id="btn-pvp" class="btn-alt">双人对战</button>
+    <button id="btn-training" class="btn-alt">训练模式</button>
+    <div class="char-select">
+      <button id="char-fighter" class="char-card selected">
+        <span class="cc-name">小烈</span>
+        <span class="cc-desc">均衡 · 速度型</span>
+      </button>
+      <button id="char-blob" class="char-card">
+        <span class="cc-name">阿蓝</span>
+        <span class="cc-desc">重装 · 血厚攻高</span>
+      </button>
+    </div>
+    <div class="diff-select">
+      <button id="diff-easy" class="diff-card">简单</button>
+      <button id="diff-normal" class="diff-card selected">普通</button>
+      <button id="diff-hard" class="diff-card">困难</button>
+    </div>
+    <div class="help">
+      <b>1P 键盘</b>：A/D 移动 · W 跳 · S 格挡 · J 拳 · K 脚 · L 波动拳 · P 暂停<br>
+      <b>2P 键盘</b>：方向键 移动/跳 · ↓ 格挡 · 4/5/6 拳/脚/波<br>
+      <b>连招</b>：拳×3 三连击 · 空中按拳 · 能量满时波动拳=超必杀
+    </div>
+  </div>
+
+  <!-- 结算画面 -->
+  <div id="result" class="panel hidden">
+    <h2 id="result-text">K.O.</h2>
+    <p id="result-detail"></p>
+    <button id="btn-rematch">再来一局</button>
+  </div>
+
+  <!-- 暂停菜单 -->
+  <div id="pause" class="panel hidden">
+    <h2>暂停</h2>
+    <button id="btn-resume">继续</button>
+    <button id="btn-restart">重开本局</button>
+    <button id="btn-quit" class="btn-alt">返回标题</button>
+  </div>
+  <button id="btn-pause" class="icon-btn hidden" aria-label="暂停" title="暂停">Ⅱ</button>
+  <button id="btn-mute" class="icon-btn" aria-label="静音" title="静音(M)">♪</button>
+
+  <!-- 输入监视器（?debug=1 时显示，绿色=该键当前被系统识别按下） -->
+  <div id="inp-monitor" class="inp-monitor hidden"></div>
+
+  <!-- 连段挑战面板（训练模式） -->
+  <div id="trial-panel" class="trial-panel hidden">
+    <div class="trial-title">连段挑战</div>
+    <div id="trial-list"></div>
+    <div id="trial-status" class="trial-status"></div>
+  </div>
+
+  <!-- 触屏控制（1P 下部 / 2P 上部，div + 容器级事件委托） -->
+  <div id="touch" class="hidden">
+    <div id="tc-2p" class="tc-2p hidden">
+      <div class="tc-2p-left">
+        <div class="tk2" data-k="left">◀</div>
+        <div class="tk2" data-k="right">▶</div>
+        <div class="tk2" data-k="jump">跳</div>
+        <div class="tk2" data-k="block">防</div>
+      </div>
+      <div class="tc-2p-right">
+        <div class="tk2" data-k="punch">拳</div>
+        <div class="tk2" data-k="kick">脚</div>
+        <div class="tk2" data-k="special">波</div>
+      </div>
+    </div>
+    <div class="tc-left">
+      <div class="tk" data-k="left">◀</div>
+      <div class="tk" data-k="right">▶</div>
+      <div class="tk" data-k="jump">跳</div>
+      <div class="tk" data-k="block">防</div>
+    </div>
+    <div class="tc-right">
+      <div class="tk" data-k="punch">拳</div>
+      <div class="tk" data-k="kick">脚</div>
+      <div class="tk" data-k="special">波</div>
+    </div>
+  </div>
+</div>
+<script>
+// PWA：支持时注册离线缓存（minis:// 等特殊协议下自动跳过）
+if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+  addEventListener('load', function () {
+    navigator.serviceWorker.register('sw.js').catch(function () {});
+  });
+}
+</script>
+<script src="game.js?v=43"></script>
+</body>
+</html>
