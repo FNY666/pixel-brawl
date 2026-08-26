@@ -1,0 +1,17 @@
+{
+  "name": "像素乱斗 PIXEL BRAWL",
+  "short_name": "像素乱斗",
+  "description": "复古像素格斗游戏：三局两胜、连招、超必杀、训练模式",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#0a1024",
+  "theme_color": "#0a1024",
+  "lang": "zh-CN",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
