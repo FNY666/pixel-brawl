@@ -110,6 +110,18 @@ if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
   });
 }
 </script>
-<script src="game.js?v=43"></script>
+<!-- 游戏脚本：01→12 顺序加载（经典脚本，勿改 ES module；详见 js/ 目录注释与 README） -->
+<script src="js/01-core.js?v=44"></script>
+<script src="js/02-data.js?v=44"></script>
+<script src="js/03-audio.js?v=44"></script>
+<script src="js/04-input.js?v=44"></script>
+<script src="js/05-fx.js?v=44"></script>
+<script src="js/06-scene.js?v=44"></script>
+<script src="js/07-fighter.js?v=44"></script>
+<script src="js/08-render.js?v=44"></script>
+<script src="js/09-trials.js?v=44"></script>
+<script src="js/10-game.js?v=44"></script>
+<script src="js/11-ui.js?v=44"></script>
+<script src="js/12-autotest.js?v=44"></script>
 </body>
 </html>
