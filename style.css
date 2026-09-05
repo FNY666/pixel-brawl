@@ -28,6 +28,11 @@ html,body { height:100%; background:#000; overflow:hidden;
   letter-spacing: .18em;
   color:#ffe95c;
   text-shadow: 0 4px 0 #b03a1a, 0 8px 24px rgba(255,180,40,.45);
+  animation: titlePulse 2.4s ease-in-out infinite;
+}
+@keyframes titlePulse {
+  0%,100% { text-shadow: 0 4px 0 #b03a1a, 0 8px 24px rgba(255,180,40,.40); }
+  50%     { text-shadow: 0 4px 0 #b03a1a, 0 8px 38px rgba(255,215,95,.75); }
 }
 #title .sub { letter-spacing:.5em; color:#9fd4ff; font-size:14px; margin-bottom:8px; }
 
@@ -38,11 +43,18 @@ html,body { height:100%; background:#000; overflow:hidden;
 
 .char-select { display:flex; gap:10px; }
 .char-card {
+  position:relative;
   display:flex; flex-direction:column; align-items:center; gap:2px;
-  min-width:128px; padding:10px 14px;
+  min-width:108px; padding:10px 14px;
   color:#cfe3ff; letter-spacing:0; font-size:14px;
   background:rgba(20,34,56,.85); border:2px solid rgba(255,255,255,.14);
   box-shadow:0 2px 0 #0c1526;
+}
+.cc-new {
+  position:absolute; top:-9px; right:-9px;
+  background:#ff4b2e; color:#fff; font-size:9px; font-weight:800;
+  padding:2px 5px; border-radius:7px; letter-spacing:.08em;
+  box-shadow:0 2px 0 #7b1a0c;
 }
 .char-card .cc-name { font-size:17px; font-weight:800; color:#fff; letter-spacing:.15em; }
 .char-card .cc-desc { font-size:10px; color:#8fb4d8; letter-spacing:.05em; }

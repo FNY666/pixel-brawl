@@ -294,7 +294,14 @@ function renderTrialPanel() {
 // 可用角色参数表（胜负手差异：速度/血量/伤害倍率）
 const CHARACTERS = {
   fighter: { name:'小烈', hp:100, speed:105, dmg:1.00, desc:'均衡 · 速度型' },
-  blob:    { name:'阿蓝', hp:125, speed:88,  dmg:1.25, desc:'重装 · 血厚攻高' }
+  blob:    { name:'阿蓝', hp:125, speed:88,  dmg:1.25, desc:'重装 · 血厚攻高' },
+  ninja:   { name:'影',   hp:88,  speed:124, dmg:0.92, desc:'迅捷 · 空中连段' }
+};
+
+// 角色配色（小烈/影共用武道服绘制，按 palette 上色；阿蓝为固定蓝色圆胖）
+const PALS = {
+  fighter: { gi:'#ff8b2e', gi_d:'#d86a18', skin:'#ffcf9e', hair:'#22222a', belt:'#3a6ad8', accent:'#ffd83a', scarf:null },
+  ninja:   { gi:'#2b2b3e', gi_d:'#15151f', skin:'#e8c9a8', hair:'#0e0e16', belt:'#d23a5a', accent:'#5ccfff', scarf:'#d23a5a' }
 };
 
 // AI 难度参数（反应间隔 / 格挡概率 / 后撤倾向）
@@ -320,7 +327,7 @@ class Fighter {
     Object.assign(this, {
       x: 0, y: GROUND, vx: 0, vy: 0, facing: 1,
       type: 'blob', name: '???',
-      hp: setHp, maxHp: setHp,
+      hp: setHp, maxHp: setHp, chipHp: setHp,
       dmg: cfg.dmg, speed: cfg.speed,
       state: 'idle',        // idle|walk|jump|attack|hit|block|ko|win
       stateT: 0,
@@ -395,7 +402,7 @@ class Fighter {
     if (name === 'special' || name === 'super') {
       this.meter -= (isSuper ? 100 : 35);
       sfx(isSuper ? 'super' : 'shot');
-      if (isSuper) goldenFlash();
+      if (isSuper) { goldenFlash(); G.slowmo = 0.32; }
     }
     return true;
   }
@@ -404,7 +411,9 @@ class Fighter {
     if (this.state === 'ko') return;
     const foeInFront = Math.sign(attacker.x - this.x) === this.facing;
     const guarded = this.blocking && this.onGround && foeInFront && this.state !== 'attack';
-    const finalDmg = guarded ? Math.max(1, Math.ceil(dmg * 0.28)) : dmg;
+    // 连段伤害衰减（真实格斗手感：同一连段越往后单发越轻）
+    const scale = guarded ? 1 : (1 - Math.min(0.5, Math.max(0, attacker.combo - 1) * 0.09));
+    const finalDmg = guarded ? Math.max(1, Math.ceil(dmg * 0.28)) : Math.max(1, Math.round(dmg * scale));
     this.hp = Math.max(0, this.hp - finalDmg);
     attacker.meter = clamp(attacker.meter + (guarded ? 5 : 14), 0, attacker.maxMeter);
     this.meter = clamp(this.meter + (guarded ? 9 : 5), 0, this.maxMeter);
@@ -435,6 +444,8 @@ class Fighter {
     attacker.comboDmg += finalDmg;
     G.hitStop = .05; G.shake = 3;
     spawnSparks(this.x, this.y - 30, dir);
+    spawnImpact(this.x, this.y - 30, dir, finalDmg >= 14);
+    spawnDmg(this.x, this.y - 46, finalDmg, finalDmg >= 14 ? '#ff9d2e' : '#ffe95c');
     sfx(dmg >= 10 ? 'kick' : 'hit');
     if (this.hp <= 0) {
       this.state = 'ko'; this.stateT = 0;
@@ -448,6 +459,7 @@ class Fighter {
     for (const k in this.cd) this.cd[k] = Math.max(0, this.cd[k] - dt);
     this.meter = clamp(this.meter + dt * 5, 0, this.maxMeter);
     this.flash = Math.max(0, this.flash - dt);
+    if (this.chipHp > this.hp) this.chipHp = Math.max(this.hp, this.chipHp - dt * 28); // 残血拖尾
 
     // 胜利姿势：动作展示，不受输入影响
     if (this.state === 'win') {
@@ -517,7 +529,7 @@ class Fighter {
           this.cd.special = ATTACKS[this.attack].cd;
           this.meter -= sup ? 100 : 35;
           sfx(sup ? 'super' : 'shot');
-          if (sup) goldenFlash();
+          if (sup) { goldenFlash(); G.slowmo = 0.32; }
           this.atkLog.push(this.attack);
         }
         else if (punchP && this.attack === 'punch') {   // 拳→拳→上踢 连段链
@@ -543,7 +555,8 @@ class Fighter {
             G.projectiles.push({ x: this.x + this.facing*20, y: this.y - 26,
               vx: this.facing * (superShot ? 320 : 220),
               dmg: Math.round(a.dmg * this.dmg), owner: this, life: 1.6,
-              r: superShot ? 13 : 7, super: superShot });
+              r: superShot ? 13 : 7, super: superShot,
+              skin: this.type === 'ninja' ? 'shuriken' : (superShot ? 'gold' : 'orb') });
             if (superShot) G.shake = 4;
           }
         } else {
@@ -663,10 +676,31 @@ class Fighter {
 // ---------- 特效 ----------
 let particles = [];
 function spawnSparks(x, y, dir, guarded = false) {
-  for (let i = 0; i < 10; i++) {
-    particles.push({ x, y, vx: dir * rand(30,160) + rand(-40,40), vy: rand(-120,40),
-      life: rand(.15,.35), t: 0, c: guarded ? (Math.random() < .5 ? '#b8f6ff' : '#5ccfff') : (Math.random() < .5 ? '#ffe95c' : '#ff8b2e'), s: irand(2,4) });
+  const n = guarded ? 8 : 12;
+  for (let i = 0; i < n; i++) {
+    particles.push({ kind:'spark', x, y, vx: dir * rand(40,180) + rand(-50,50), vy: rand(-150,50),
+      life: rand(.18,.38), t: 0, c: guarded ? (Math.random() < .5 ? '#b8f6ff' : '#5ccfff') : (Math.random() < .5 ? '#ffe95c' : '#ff8b2e'), s: irand(2,4) });
   }
+}
+// 四角冲击星（日式格斗打击感）
+function spawnImpact(x, y, dir, big) {
+  particles.push({ kind:'star', x, y, dir, life: big ? 0.22 : 0.16, t: 0, s: big ? 16 : 11, c: '#fff4c8', rot: 0 });
+  particles.push({ kind:'star', x, y, dir: dir * 0.2, life: big ? 0.18 : 0.13, t: 0, s: big ? 11 : 8, c: '#ff9d2e', rot: Math.PI / 4 });
+  if (big) spawnShock(x, y);
+}
+function spawnShock(x, y) {
+  particles.push({ kind:'ring', x, y, life: 0.3, t: 0, r0: 4, r1: 30, c: 'rgba(255,220,120,.9)', vx: 0, vy: 0 });
+}
+function spawnDmg(x, y, val, color) {
+  G.dmgNums.push({ x, y, val, life: 0.8, t: 0, c: color || '#fff4c8', vy: -34 });
+}
+// 四角星绘制
+function drawStar(x, y, s, rot, c) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot); ctx.fillStyle = c;
+  ctx.beginPath();
+  ctx.moveTo(0, -s); ctx.lineTo(s * .28, -s * .28); ctx.lineTo(s, 0); ctx.lineTo(s * .28, s * .28);
+  ctx.lineTo(0, s); ctx.lineTo(-s * .28, s * .28); ctx.lineTo(-s, 0); ctx.lineTo(-s * .28, -s * .28);
+  ctx.closePath(); ctx.fill(); ctx.restore();
 }
 
 // 超必杀命中爆发
@@ -715,6 +749,9 @@ const G = {
   hitStop: 0,
   projectiles: [],
   comboShow: 0, comboSide: 1, comboT: 0,
+  slowmo: 1,            // 慢动作速度系数（1=正常，<1 电影感）
+  dmgNums: [],          // 浮动伤害数字
+  perfect: false,       // 本回合是否满血取胜
   p1: null, p2: null
 };
 
@@ -774,6 +811,7 @@ function startRound() {
   G.winner = null; G.roundCause = '';
   G.pausedFrom = null;
   G.shake = 0; G.hitStop = 0; G.comboShow = 0; G.comboT = 0;
+  G.slowmo = 1; G.dmgNums = []; G.perfect = false;
   G.introT = 0;
   G.scene = pickScene();
   G.vsTimer = 0;
@@ -847,7 +885,8 @@ function finishRound(winner, cause) {
   if (winner === G.p2) G.wins.p2++;
   if (cause === 'ko') {
     G.state = 'ko';
-    sfx('ko'); G.shake = 6;
+    sfx('ko'); G.shake = 6; G.slowmo = 0.3;
+    if (winner && winner.hp >= winner.maxHp - 0.5) G.perfect = true; // 满血取胜
   } else {
     G.state = 'timeup';
     G.shake = 2;
@@ -941,6 +980,64 @@ const SCENES = {
   starry:  { sky:['#0a0a1a','#1a0a2a','#0a0a1a'], hill1:'#2a2a3a', hill2:'#3a2a3a', tree:'#1a2a1a', trunk:'#2a1a1a', ground:'#2a2a3a', ground2:'#1a1a2a', fence:'#3a2a2a', stars:true }
 };
 const ARCADE_SCENE_ORDER = ['day', 'evening', 'night', 'dojo', 'starry'];
+
+// 动态背景元素（时间驱动，营造视差与生命感）
+const _rng = (() => { let s = 99173; return () => (s = (s * 16807) % 2147483647) / 2147483647; })();
+const CLOUDS = Array.from({ length: 5 }, () => ({ x: _rng() * W, y: 16 + _rng() * 42, w: 34 + _rng() * 46, s: 3 + _rng() * 7 }));
+const STARS  = Array.from({ length: 72 }, () => ({ x: _rng() * W, y: _rng() * 118, p: _rng() * 6.28, sp: 1 + _rng() * 2.4 }));
+const FIREFL = Array.from({ length: 14 }, () => ({ x: 20 + _rng() * (W - 40), y: 120 + _rng() * 90, p: _rng() * 6.28, sp: .6 + _rng() * 1.1, r: 1 + _rng() * 1.4 }));
+
+// 场景上方的动态层：日月光晕 / 飘云 / 闪烁星 / 萤火 / 摆动的旗
+function drawDynamicBG(t) {
+  const sc = SCENES[G.scene] || SCENES.day;
+  const night = !!sc.stars;
+  // 日 / 月光晕
+  if (night) {
+    const mx = G.scene === 'starry' ? 400 : 96, my = G.scene === 'starry' ? 30 : 40;
+    const g = ctx.createRadialGradient(mx, my, 2, mx, my, 30);
+    g.addColorStop(0, 'rgba(235,238,255,.95)'); g.addColorStop(.5, 'rgba(200,210,255,.35)'); g.addColorStop(1, 'rgba(200,210,255,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(mx, my, 30, 0, 7); ctx.fill();
+    ctx.fillStyle = '#f3f5ff'; ctx.fillRect(mx - 9, my - 9, 18, 18);
+    ctx.fillStyle = sc.sky[0]; ctx.fillRect(mx - 9, my - 9, 7, 18); ctx.fillRect(mx - 9, my - 9, 18, 6);
+  } else {
+    const sx = G.scene === 'dojo' ? 400 : 70, sy = G.scene === 'dojo' ? 36 : 34;
+    const sg = ctx.createRadialGradient(sx, sy, 3, sx, sy, 46);
+    const warm = G.scene === 'evening' ? 'rgba(255,180,90,' : 'rgba(255,240,180,';
+    sg.addColorStop(0, warm + '.95)'); sg.addColorStop(.4, warm + '.40)'); sg.addColorStop(1, warm + '0)');
+    ctx.fillStyle = sg; ctx.beginPath(); ctx.arc(sx, sy, 46, 0, 7); ctx.fill();
+    ctx.fillStyle = G.scene === 'evening' ? '#ffd28a' : '#fff4c8'; ctx.fillRect(sx - 8, sy - 8, 16, 16);
+  }
+  // 飘云（白昼/黄昏），视差慢移
+  if (!night) {
+    ctx.fillStyle = 'rgba(255,255,255,.42)';
+    for (const c of CLOUDS) {
+      const x = ((c.x + t * c.s) % (W + 120)) - 60;
+      ctx.fillRect(x, c.y, c.w, 7); ctx.fillRect(x + 8, c.y - 4, c.w - 16, 5);
+      ctx.fillRect(x + c.w * .3, c.y + 6, c.w * .5, 4);
+    }
+  }
+  // 闪烁星
+  if (night) {
+    for (const s of STARS) {
+      const a = .35 + .55 * (0.5 + 0.5 * Math.sin(t * s.sp + s.p));
+      ctx.fillStyle = 'rgba(232,236,255,' + a.toFixed(3) + ')';
+      ctx.fillRect(s.x | 0, s.y | 0, 2, 2);
+    }
+  }
+  // 萤火（道场/星空氛围）
+  if (G.scene === 'dojo' || G.scene === 'starry') {
+    for (const f of FIREFL) {
+      const a = .25 + .55 * (0.5 + 0.5 * Math.sin(t * f.sp + f.p));
+      ctx.fillStyle = (G.scene === 'dojo' ? 'rgba(255,200,120,' : 'rgba(150,220,255,') + a.toFixed(3) + ')';
+      ctx.fillRect((f.x + Math.sin(t * .5 + f.p) * 6) | 0, (f.y + Math.cos(t * .4 + f.p) * 5) | 0, f.r | 0, f.r | 0);
+    }
+  }
+  // 栅栏上的小旗随风摆动
+  const fw = Math.sin(t * 3) * 2;
+  ctx.fillStyle = '#c23a2a';
+  ctx.beginPath();
+  ctx.moveTo(W - 30, 196); ctx.lineTo(W - 14 + fw, 200); ctx.lineTo(W - 30, 206); ctx.fill();
+}
 function pickScene() {
   if (G.mode === 'arcade') return ARCADE_SCENE_ORDER[Math.min(4, G.arcade.stage - 1)];
   return 'day';
@@ -956,13 +1053,6 @@ function buildBG(sceneKey) {
   const sky = b.createLinearGradient(0, 0, 0, GROUND);
   sky.addColorStop(0, sc.sky[0]); sky.addColorStop(.6, sc.sky[1]); sky.addColorStop(1, sc.sky[2]);
   b.fillStyle = sky; b.fillRect(0, 0, W, GROUND);
-  // 云（白昼/黄昏）
-  if (!sc.stars) {
-    b.fillStyle = 'rgba(255,255,255,.45)';
-    [[60,30,50],[200,22,40],[330,40,60],[420,26,36]].forEach(([x,y,w]) => {
-      b.fillRect(x, y, w, 8); b.fillRect(x+8, y-5, w-16, 5);
-    });
-  }
   // 远山
   b.fillStyle = sc.hill1;
   b.beginPath(); b.moveTo(0, GROUND);
@@ -1027,8 +1117,9 @@ function drawFighter(f, time) {
       px(-12, -58 + bounce, 5, 24, '#3a8ad8'); px(-14, -60 + bounce, 8, 8, '#f4f4f0');
       px(7, -58 + bounce, 5, 24, '#3a8ad8');  px(6, -60 + bounce, 8, 8, '#f4f4f0');
     } else {
-      px(-11, -56 + bounce, 5, 22, '#ff8b2e'); px(-13, -58 + bounce, 8, 8, '#ffcf9e');
-      px(7, -56 + bounce, 5, 22, '#ff8b2e');  px(6, -58 + bounce, 8, 8, '#ffcf9e');
+      const P = PALS[f.type] || PALS.fighter;
+      px(-11, -56 + bounce, 5, 22, P.gi); px(-13, -58 + bounce, 8, 8, P.skin);
+      px(7, -56 + bounce, 5, 22, P.gi);  px(6, -58 + bounce, 8, 8, P.skin);
     }
   }
 
@@ -1103,7 +1194,8 @@ function drawMartial(f, t, bob) {
   const ko = f.state === 'ko';
   ctx.save();
   if (ko) { ctx.rotate(-Math.PI/2 * Math.min(1, f.stateT*3)); ctx.translate(0, -8); }
-  const SK = '#ffcf9e', HAIR = '#22222a', GI = '#ff8b2e', GI_D = '#d86a18', BLUE = '#3a6ad8';
+  const P = PALS[f.type] || PALS.fighter;
+  const SK = P.skin, HAIR = P.hair, GI = P.gi, GI_D = P.gi_d, BLUE = P.belt, ACC = P.accent;
 
   const legSpread = f.state === 'walk' ? Math.sin(f.walkPhase)*3 : 0;
   // 腿
@@ -1123,6 +1215,14 @@ function drawMartial(f, t, bob) {
   px(-11, -53+bob, 3, 5, HAIR);
   px(8, -53+bob, 3, 5, HAIR);
   px(-5, -58+bob, 4, 4, HAIR); px(1, -58+bob, 4, 4, HAIR);
+  // 头带 + 飘动围巾（影专属）
+  if (P.scarf) {
+    px(-8, -52+bob, 16, 3, P.accent);
+    const fl = Math.sin(t*9 + f.facing)*2;
+    px(-9, -36+bob, 9, 4, P.scarf);
+    px(-12, -34+bob, 4, 9+fl, P.scarf);
+    px(-13, -25+bob+fl, 4, 7, P.scarf);
+  }
   // 眉眼
   if (f.state === 'hit' || f.state === 'ko') {
     px(-6, -44+bob, 5, 2, '#222'); px(1, -44+bob, 5, 2, '#222');
@@ -1202,6 +1302,13 @@ function drawPortrait(x, y, type) {
     px(6,8,6,7,'#f4f4f0'); px(14,8,6,7,'#f4f4f0');
     px(8,10,3,4,'#222'); px(16,10,3,4,'#222');
     px(11,17,5,3,'#d8382a');
+  } else if (type === 'ninja') {
+    px(0,0,26,26,'#2a2a3a');
+    px(3,6,20,17,'#e8c9a8');
+    px(3,3,20,8,'#0e0e16');
+    px(6,12,5,4,'#222'); px(15,12,5,4,'#222');
+    px(10,19,6,2,'#a05a40');
+    px(3,5,20,2,'#d23a5a'); // 头带
   } else {
     px(0,0,26,26,'#2a3a55');
     px(3,6,20,17,'#ffcf9e');
@@ -1214,21 +1321,28 @@ function drawPortrait(x, y, type) {
 
 function drawHUD() {
   const p1 = G.p1, p2 = G.p2;
-  // 血条底
-  function bar(x, w, pct, flip) {
+  // 血条底（带残血拖尾）
+  function bar(x, w, pct, chip, flip) {
     px(x, 8, w, 10, '#1a1a22');
     px(x+1, 9, w-2, 8, '#3a1a10');
-    const fw = Math.round((w-2) * pct);
-    if (pct > .5) px(flip ? x+1+(w-2-fw) : x+1, 9, fw, 8, '#5ad83a');
-    else if (pct > .25) px(flip ? x+1+(w-2-fw) : x+1, 9, fw, 8, '#ffd83a');
-    else px(flip ? x+1+(w-2-fw) : x+1, 9, fw, 8, '#ff4b2e');
+    const fw = Math.max(0, Math.round((w-2) * pct));
+    const fc = Math.max(fw, Math.round((w-2) * chip));
+    const col = pct > .5 ? '#5ad83a' : (pct > .25 ? '#ffd83a' : '#ff4b2e');
+    if (flip) {
+      px(x+1+(w-2-fc), 9, fc, 8, '#e8d8c8');   // 残血（白）
+      px(x+1+(w-2-fw), 9, fw, 8, col);          // 当前血量
+    } else {
+      px(x+1, 9, fc, 8, '#e8d8c8');
+      px(x+1, 9, fw, 8, col);
+    }
+    px(x+1, 9, fw, 2, 'rgba(255,255,255,.35)'); // 顶部高光
     px(x, 8, w, 2, 'rgba(255,255,255,.25)');
   }
-  bar(34, 170, p1.hp / p1.maxHp, false);
-  bar(W-34-170, 170, p2.hp / p2.maxHp, true);
+  bar(34, 170, p1.hp / p1.maxHp, p1.chipHp / p1.maxHp, false);
+  bar(W-34-170, 170, p2.hp / p2.maxHp, p2.chipHp / p2.maxHp, true);
   // 头像框
-  drawPortrait(4, 4, 'fighter');
-  ctx.save(); ctx.translate(W-30, 0); ctx.scale(-1,1); drawPortrait(0, 4, 'blob'); ctx.restore();
+  drawPortrait(4, 4, p1.type);
+  ctx.save(); ctx.translate(W-30, 0); ctx.scale(-1,1); drawPortrait(0, 4, p2.type); ctx.restore();
   // 名字
   ctx.font = '8px monospace'; ctx.textBaseline = 'top';
   ctx.fillStyle = '#fff'; ctx.textAlign = 'left';
@@ -1272,18 +1386,22 @@ function drawHUD() {
     ctx.font = 'bold 7px monospace'; ctx.fillStyle = '#5ccfff';
     ctx.fillText('TRAINING', W / 2, 51);
   }
-  // 连击显示
+  // 连击显示（弹跳缩放 + 高连变红）
   if (G.comboShow >= 2 && G.comboT > 0) {
+    const right = G.comboSide === 1;
+    const cx = right ? W - 40 : 40;
+    const txt = G.comboShow + ' HIT' + ' · ' + (right ? G.p1.comboDmg : G.p2.comboDmg) + ' DMG';
+    const sx = cx + (right ? -1 : 1) * Math.max(0, 4 - G.comboT * 20);
+    const pop = Math.max(0, G.comboT - 0.8) / 0.4;
     ctx.save();
-    ctx.font = 'bold 16px monospace'; ctx.textAlign = 'right';
-    const cx = G.comboSide === 1 ? W - 40 : 40;
-    ctx.textAlign = G.comboSide === 1 ? 'right' : 'left';
-    ctx.fillStyle = '#ffe95c';
+    ctx.translate(sx, 44);
+    ctx.scale(1 + pop * 0.5, 1 + pop * 0.5);
+    ctx.font = 'bold 16px monospace';
+    ctx.textAlign = right ? 'right' : 'left';
+    ctx.fillStyle = G.comboShow >= 6 ? '#ff6b2e' : '#ffe95c';
     ctx.strokeStyle = '#8a2a10'; ctx.lineWidth = 3;
-    const txt = G.comboShow + ' HIT' + ' · ' + (G.comboSide === 1 ? G.p1.comboDmg : G.p2.comboDmg) + ' DMG';
-    const sx = cx + (G.comboSide===1?-1:1) * Math.max(0, 4 - G.comboT*20);
-    ctx.strokeText(txt, sx, 44);
-    ctx.fillText(txt, sx, 44);
+    ctx.strokeText(txt, 0, 0);
+    ctx.fillText(txt, 0, 0);
     ctx.restore();
   }
 }
@@ -1303,6 +1421,8 @@ function frame(now) {
 
   let dt = rawDt;
   if (G.hitStop > 0) { G.hitStop -= rawDt; dt = 0; } // 命中停帧
+  if (G.slowmo < 1) G.slowmo = Math.min(1, G.slowmo + rawDt * 1.6); // 慢动作回升
+  if (G.slowmo < 1 && dt > 0) dt *= G.slowmo;
 
   if (G.state === 'vs') {
     G.vsTimer += rawDt;
@@ -1347,9 +1467,12 @@ function frame(now) {
   }
   G.projectiles = G.projectiles.filter(p => p.life > 0 && p.x > -20 && p.x < W + 20);
 
-  // 粒子
-  for (const pt of particles) { pt.t += rawDt; pt.x += pt.vx*rawDt; pt.y += pt.vy*rawDt; pt.vy += 300*rawDt; }
+  // 粒子（随慢动作一起减速，强化电影感）
+  for (const pt of particles) { pt.t += dt; pt.x += (pt.vx || 0) * dt; pt.y += (pt.vy || 0) * dt; pt.vy += 300 * dt; }
   particles = particles.filter(pt => pt.t < pt.life);
+  // 浮动伤害数字
+  for (const d of G.dmgNums) { d.t += dt; d.y += d.vy * dt; d.vy += 70 * dt; }
+  G.dmgNums = G.dmgNums.filter(d => d.t < d.life);
 
   // 连击显示计时
   const lastCombo = Math.max(G.p1.combo, G.p2.combo);
@@ -1365,7 +1488,9 @@ function frame(now) {
 
 function drawTitleBG() {
   ctx.drawImage(sceneCanvas(), 0, 0);
-  ctx.fillStyle = 'rgba(0,0,0,.3)'; ctx.fillRect(0,0,W,H);
+  drawDynamicBG(gameTime);
+  ctx.fillStyle = 'rgba(0,0,0,.34)'; ctx.fillRect(0,0,W,H);
+  drawScreenFX();
 }
 
 function render(dt) {
@@ -1373,6 +1498,7 @@ function render(dt) {
   if (G.shake > 0) ctx.translate(rand(-G.shake, G.shake), rand(-G.shake, G.shake));
 
   ctx.drawImage(sceneCanvas(), 0, 0);
+  drawDynamicBG(gameTime);
 
   if (G.p1 && G.p2) {
     // 影子
@@ -1384,7 +1510,7 @@ function render(dt) {
     // 后画的在上
     drawFighter(G.p2, gameTime);
     drawFighter(G.p1, gameTime);
-    // 飞行道具（波动拳 / 超必杀金波）
+    // 飞行道具（波动拳 / 超必杀金波 / 手里剑）
     for (const p of G.projectiles) {
       const r = p.r;
       if (p.super) {
@@ -1395,6 +1521,10 @@ function render(dt) {
         ctx.fillStyle = 'rgba(255,220,80,.55)';
         ctx.fillRect(p.x - Math.sign(p.vx)*r*2 - r*1.5, p.y - 5, r*3, 10);
         ctx.fillRect(p.x - Math.sign(p.vx)*r*3 - r*2, p.y - 3, r*3, 6);
+      } else if (p.skin === 'shuriken') {
+        ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(gameTime * 18); ctx.fillStyle = '#dfe8ff';
+        for (let i = 0; i < 4; i++) { ctx.rotate(Math.PI/2); ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(-2,-r-2); ctx.lineTo(2,-r-2); ctx.closePath(); ctx.fill(); }
+        px(-2, -2, 4, 4, '#5ccfff'); ctx.restore();
       } else {
         px(p.x - r, p.y - r, r*2, r*2, '#7ad8ff');
         px(p.x - r+2, p.y - r+2, r*2-4, r*2-4, '#c8ecff');
@@ -1403,13 +1533,33 @@ function render(dt) {
         px(p.x - Math.sign(p.vx)*r*2 - r/2, p.y - 3, r, 6, 'rgba(122,216,255,.4)');
       }
     }
-    // 粒子
+    // 粒子（分类渲染：火花 / 冲击星 / 冲击波）
     for (const pt of particles) {
-      ctx.globalAlpha = 1 - pt.t/pt.life;
-      px(pt.x, pt.y, pt.s, pt.s, pt.c);
+      const k = 1 - pt.t / pt.life;
+      ctx.globalAlpha = k;
+      if (pt.kind === 'ring') {
+        const r = pt.r0 + (pt.r1 - pt.r0) * (pt.t / pt.life);
+        ctx.strokeStyle = pt.c; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(pt.x, pt.y, r, 0, 7); ctx.stroke();
+      } else if (pt.kind === 'star') {
+        const s = pt.s * (0.6 + 0.4 * (pt.t / pt.life));
+        drawStar(pt.x, pt.y, s, pt.rot || 0, pt.c);
+      } else {
+        px(pt.x, pt.y, pt.s, pt.s, pt.c);
+      }
       ctx.globalAlpha = 1;
     }
     drawHUD();
+    // 浮动伤害数字
+    for (const d of G.dmgNums) {
+      ctx.globalAlpha = Math.min(1, d.life * 2);
+      const fs = 10 + Math.min(8, d.val / 5);
+      ctx.font = 'bold ' + fs.toFixed(0) + 'px monospace';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = d.c; ctx.strokeStyle = 'rgba(0,0,0,.65)'; ctx.lineWidth = 3;
+      ctx.strokeText(d.val, d.x, d.y); ctx.fillText(d.val, d.x, d.y);
+    }
+    ctx.globalAlpha = 1;
   }
 
   // 回合标识与倒计时提示
@@ -1444,10 +1594,28 @@ function render(dt) {
     ctx.font = 'bold 56px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.strokeStyle = '#5c0d00'; ctx.lineWidth = 8; ctx.strokeText('K.O.', 0, 0);
     ctx.fillStyle = '#ff4b2e'; ctx.fillText('K.O.', 0, 0);
+    if (G.perfect) {
+      ctx.font = 'bold 18px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.strokeStyle = '#5c0d00'; ctx.lineWidth = 4;
+      ctx.strokeText('PERFECT', 0, -42); ctx.fillStyle = '#ffe95c'; ctx.fillText('PERFECT', 0, -42);
+    }
     ctx.restore();
   }
 
   ctx.restore();
+  drawScreenFX();
+}
+
+// CRT 后期：扫描线 + 暗角 + 边缘暖光（复古街机质感）
+function drawScreenFX() {
+  ctx.globalAlpha = 0.10; ctx.fillStyle = '#000';
+  for (let y = 0; y < H; y += 2) ctx.fillRect(0, y, W, 1);
+  ctx.globalAlpha = 1;
+  const v = ctx.createRadialGradient(W / 2, H / 2, H * 0.32, W / 2, H / 2, H * 0.78);
+  v.addColorStop(0, 'rgba(0,0,0,0)');
+  v.addColorStop(1, 'rgba(0,0,0,0.36)');
+  ctx.fillStyle = v; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(255,150,60,0.05)'; ctx.fillRect(0, 0, W, 3);
 }
 
 // ---------- 启动 ----------
@@ -1485,9 +1653,11 @@ function selectCharacter(type) {
   G.playerType = type;
   document.getElementById('char-fighter').classList.toggle('selected', type === 'fighter');
   document.getElementById('char-blob').classList.toggle('selected', type === 'blob');
+  document.getElementById('char-ninja').classList.toggle('selected', type === 'ninja');
 }
 document.getElementById('char-fighter').addEventListener('click', () => selectCharacter('fighter'));
 document.getElementById('char-blob').addEventListener('click', () => selectCharacter('blob'));
+document.getElementById('char-ninja').addEventListener('click', () => selectCharacter('ninja'));
 
 // 难度选择
 function selectDifficulty(level) {
