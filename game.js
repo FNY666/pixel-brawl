@@ -317,11 +317,13 @@ function bindKeys(containerSel, keySel, target) {
   }
 }
 
-// 全局触摸手势拦截：capture 阶段阻止 Safari 双击缩放/双指手势/长按菜单识别，
-// 保证第二个手指与快速连打的事件不被浏览器吞掉（游戏全屏无滚动，无副作用）
+// 触摸手势拦截：只在玩法表面（画布 / 触屏按键层）阻止 Safari 双击缩放/双指手势/长按菜单，
+// 保证第二个手指与快速连打不被吞掉。菜单面板（#title / #result 等）必须放行——
+// iOS 上对 touchstart 调用 preventDefault 会阻止 click 事件合成，拦截全文档会导致按钮点不了。
 if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
-  document.addEventListener('touchstart', e => { e.preventDefault(); }, { passive: false, capture: true });
-  document.addEventListener('touchmove',  e => { e.preventDefault(); }, { passive: false, capture: true });
+  const inGameSurface = (e) => !!(e.target && e.target.closest && e.target.closest('#touch, #cv'));
+  document.addEventListener('touchstart', e => { if (inGameSurface(e)) e.preventDefault(); }, { passive: false, capture: true });
+  document.addEventListener('touchmove',  e => { if (inGameSurface(e)) e.preventDefault(); }, { passive: false, capture: true });
 }
 bindKeys('#touch', '.tk', input);   // 1P：下半区
 bindKeys('#touch', '.tk2', input2); // 2P：上半区
