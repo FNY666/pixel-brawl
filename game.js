@@ -36,12 +36,27 @@ const COMBAT = {
   atkBufFrames: 25,      // 攻击输入缓冲帧数
   hitStunTime: 0.32,     // 受击硬直时长（秒）
   specialCost: 35,       // 波动拳能量消耗
-  pressRecency: 1,       // 键盘按下被识别为"刚按下"的帧窗口
+  pressRecency: 7,       // 键盘按下被识别为"刚按下"的帧窗口（6–8f 输入缓冲，大厂格斗标配）
 };
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const rand = (a, b) => a + Math.random() * (b - a);
 const irand = (a, b) => Math.floor(rand(a, b + 1));
+
+// ---------- 打击手感（纯反馈层：不改伤害 / 帧数据 / 物理 / AI） ----------
+// hitstop 帧数：大乱斗式 ⌊dmg×0.65+6⌋（6f 起，25f 封顶）；格挡取 60%。冻结双方，输入照常采集
+function hitstopFor(dmg, guarded) {
+  let f = Math.floor(dmg * 0.65 + 6);
+  f = clamp(f, 6, 25);
+  if (guarded) f = Math.max(4, Math.round(f * 0.6));
+  return f / 60;
+}
+// trauma 震动：addTrauma 累加（上限 1），1.5/s 衰减，渲染偏移 = trauma² × 7px（横向为主）
+function addTrauma(x) { G.trauma = Math.min(1, G.trauma + x); }
+function traumaFor(dmg, guarded) {
+  if (guarded) return 0.15;
+  return clamp(0.18 + dmg * 0.014, 0.2, 0.7); // 轻 0.26 / 中 0.38 / 重 0.5+ / 超必杀 0.6+
+}
 
 // ---------- 背景音乐（chipTune 音序器） ----------
 // 旋律/低音用半音索引表达：C4=0, D4=2, E4=4, F4=5, G4=7, A4=9, B4=11, C5=12…；-1=休止
@@ -100,6 +115,61 @@ function stopBGM() {
 
 // ---------- 音效（WebAudio 极简合成） ----------
 let AC = null;
+let _noiseBuf = null;
+function noiseBuf() {
+  if (!_noiseBuf) {
+    _noiseBuf = AC.createBuffer(1, AC.sampleRate * 0.3, AC.sampleRate);
+    const d = _noiseBuf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  }
+  return _noiseBuf;
+}
+// 音高随机 ±2 半音（避免重复打击听觉疲劳）
+const detune = () => Math.pow(2, rand(-2, 2) / 12);
+// 分层打击音：瞬态（高频咬合）+ 本体（中频闷响）+ 低频（胸腔共鸣），重击加深
+function sfxHit(tier) {
+  try {
+    if (!AC) AC = new (window.AudioContext || window.webkitAudioContext)();
+    const t = AC.currentTime, dt = detune();
+    const heavy = tier === 'heavy', med = tier === 'medium';
+    const vol = heavy ? 1 : (med ? 0.85 : 0.7);
+    // 瞬态层：高频方波咬合
+    const o1 = AC.createOscillator(), g1 = AC.createGain();
+    o1.type = 'square'; o1.frequency.setValueAtTime((heavy ? 700 : 900) * dt, t);
+    o1.frequency.exponentialRampToValueAtTime(180 * dt, t + .05);
+    g1.gain.setValueAtTime(.10 * vol, t); g1.gain.exponentialRampToValueAtTime(.001, t + .06);
+    o1.connect(g1); g1.connect(AC.destination); o1.start(t); o1.stop(t + .07);
+    // 本体层：中频闷响
+    const o2 = AC.createOscillator(), g2 = AC.createGain();
+    o2.type = 'square'; o2.frequency.setValueAtTime((heavy ? 130 : 170) * dt, t);
+    o2.frequency.exponentialRampToValueAtTime(55 * dt, t + (heavy ? .14 : .1));
+    g2.gain.setValueAtTime(.16 * vol, t); g2.gain.exponentialRampToValueAtTime(.001, t + (heavy ? .16 : .12));
+    o2.connect(g2); g2.connect(AC.destination); o2.start(t); o2.stop(t + (heavy ? .17 : .13));
+    // 低频层：正弦胸腔共鸣（重击更深）
+    const o3 = AC.createOscillator(), g3 = AC.createGain();
+    o3.type = 'sine'; o3.frequency.setValueAtTime((heavy ? 90 : 75) * dt, t);
+    o3.frequency.exponentialRampToValueAtTime(38 * dt, t + .16);
+    g3.gain.setValueAtTime((heavy ? .20 : .12) * vol, t); g3.gain.exponentialRampToValueAtTime(.001, t + .18);
+    o3.connect(g3); g3.connect(AC.destination); o3.start(t); o3.stop(t + .19);
+  } catch(e) {}
+}
+// 挥空 whoosh：带通噪声下扫，出招启动时播放（比命中早 80–120ms）
+function sfxWhoosh(big) {
+  try {
+    if (!AC) AC = new (window.AudioContext || window.webkitAudioContext)();
+    const t = AC.currentTime, dur = big ? .18 : .12;
+    const src = AC.createBufferSource(); src.buffer = noiseBuf();
+    const bp = AC.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 1.2;
+    bp.frequency.setValueAtTime(big ? 2600 : 3200, t);
+    bp.frequency.exponentialRampToValueAtTime(500, t + dur);
+    const g = AC.createGain();
+    g.gain.setValueAtTime(.0001, t);
+    g.gain.exponentialRampToValueAtTime(big ? .14 : .09, t + dur * .3);
+    g.gain.exponentialRampToValueAtTime(.001, t + dur);
+    src.connect(bp); bp.connect(g); g.connect(AC.destination);
+    src.start(t); src.stop(t + dur + .02);
+  } catch(e) {}
+}
 function sfx(kind) {
   try {
     if (!AC) AC = new (window.AudioContext || window.webkitAudioContext)();
@@ -410,6 +480,7 @@ class Fighter {
       if (next) {
         // 启动下一段：继承首次输入的进攻意志，重置攻击状态
         this.attack = next; this.stateT = 0; this.hitDone = false;
+        sfxWhoosh(/kick/.test(next));
         this.atkLog.push(next);
         if (this.atkLog.length > 8) this.atkLog.shift();
         return true;
@@ -428,6 +499,7 @@ class Fighter {
     this.blocking = false;
     this.state = 'attack'; this.stateT = 0;
     this.attack = name; this.hitDone = false;
+    if (!a.projectile) sfxWhoosh(name === 'kick'); // 挥空 whoosh（比命中早 80–120ms）
     this.atkLog.push(name);
     if (this.atkLog.length > 8) this.atkLog.shift();
     this.cd[name] = ATTACKS[name].cd;
@@ -439,7 +511,7 @@ class Fighter {
     return true;
   }
 
-  takeHit(dmg, dir, kb, attacker) {
+  takeHit(dmg, dir, kb, attacker, atkName) {
     if (this.state === 'ko') return;
     const foeInFront = Math.sign(attacker.x - this.x) === this.facing;
     const guarded = this.blocking && this.onGround && foeInFront && this.state !== 'attack';
@@ -454,7 +526,7 @@ class Fighter {
       this.state = 'block'; this.stateT = 0;
       this.vx = dir * kb * 0.18;
       this.flash = .08;
-      G.hitStop = .025; G.shake = 1;
+      G.hitStop = hitstopFor(dmg, true); addTrauma(traumaFor(dmg, true));
       spawnSparks(this.x, this.y - 30, dir, true);
       sfx('block');
       if (this.hp <= 0) {
@@ -474,11 +546,17 @@ class Fighter {
     this.flash = .12;
     attacker.combo++;
     attacker.comboDmg += finalDmg;
-    G.hitStop = .05; G.shake = 3;
+    G.hitStop = hitstopFor(finalDmg, false); addTrauma(traumaFor(finalDmg, false));
     spawnSparks(this.x, this.y - 30, dir);
-    spawnImpact(this.x, this.y - 30, dir, finalDmg >= 14);
-    spawnDmg(this.x, this.y - 46, finalDmg, finalDmg >= 14 ? '#ff9d2e' : '#ffe95c');
-    sfx(dmg >= 10 ? 'kick' : 'hit');
+    spawnImpact(this.x, this.y - 30, dir, finalDmg >= 12);
+    if (atkName && /kick/.test(atkName)) spawnArc(this.x, this.y - 30, dir); // 踢技方向性弧光
+    spawnDmg(this.x, this.y - 46, finalDmg, finalDmg >= 12 ? '#ff9d2e' : '#ffe95c');
+    sfxHit(finalDmg >= 12 ? 'heavy' : (finalDmg >= 8 ? 'medium' : 'light'));
+    if (finalDmg >= 12) {
+      G.zoomPunch = Math.max(G.zoomPunch, 0.18);   // 重击 180ms 轻微推镜
+      G.impactFlash = Math.max(G.impactFlash, 2);  // 2 帧冲击闪光
+      if (this.onGround) spawnDust(this.x, GROUND, 5);
+    }
     if (this.hp <= 0) {
       this.state = 'ko'; this.stateT = 0;
       this.vx = dir * 160; this.vy = -140;
@@ -503,7 +581,7 @@ class Fighter {
     if (this.state === 'ko') {
       this.vy += PHYS.gravity * dt;
       this.x += this.vx * dt; this.y += this.vy * dt;
-      if (this.y > GROUND) { this.y = GROUND; this.vy = 0; this.vx *= .8; }
+      if (this.y > GROUND) { if (this.vy > 200) spawnDust(this.x, GROUND, 6); this.y = GROUND; this.vy = 0; this.vx *= .8; }
       this.x = clamp(this.x, PHYS.arenaL, PHYS.arenaR);
       return;
     }
@@ -588,7 +666,7 @@ class Fighter {
               dmg: Math.round(a.dmg * this.dmg), owner: this, life: 1.6,
               r: superShot ? 13 : 7, super: superShot,
               skin: this.type === 'ninja' ? 'shuriken' : (superShot ? 'gold' : 'orb') });
-            if (superShot) G.shake = 4;
+            if (superShot) { addTrauma(0.5); G.zoomPunch = Math.max(G.zoomPunch, 0.22); }
           }
         } else {
           const hx = this.x + this.facing * a.reach;
@@ -597,7 +675,7 @@ class Fighter {
           if (hb.x < fb.x + fb.w && hb.x + hb.w > fb.x && hb.y < fb.y + fb.h && hb.y + hb.h > fb.y) {
             this.hitDone = true;
             const dmg = Math.round(a.dmg * this.dmg);
-            foe.takeHit(dmg, this.facing, a.kb, this);
+            foe.takeHit(dmg, this.facing, a.kb, this, this.attack);
             if (a.last && foe.state !== 'ko') { foe.vy = -90; foe.vx = this.facing * 110; } // 终结踢上挑
           }
         }
@@ -635,7 +713,7 @@ class Fighter {
     this.vy += PHYS.gravity * dt;
     this.x += move * this.speed * dt;
     this.y += this.vy * dt;
-    if (this.y > GROUND) { this.y = GROUND; this.vy = 0; }
+    if (this.y > GROUND) { if (this.vy > 170) spawnDust(this.x, GROUND, 6); this.y = GROUND; this.vy = 0; }
     if (move !== 0 && this.onGround) { this.state = 'walk'; this.walkPhase += dt * 10; }
     else if (this.onGround) this.state = 'idle';
     else this.state = 'jump';
@@ -722,6 +800,18 @@ function spawnImpact(x, y, dir, big) {
 function spawnShock(x, y) {
   particles.push({ kind:'ring', x, y, life: 0.3, t: 0, r0: 4, r1: 30, c: 'rgba(255,220,120,.9)', vx: 0, vy: 0 });
 }
+// 踢技方向性弧光（BlazBlue 式）：沿出招方向展开的短弧
+function spawnArc(x, y, dir) {
+  particles.push({ kind:'arc', x, y, dir, life: 0.16, t: 0, r: 24, c: '#dff3ff' });
+}
+// 落地 / 重击扬尘
+function spawnDust(x, y, n) {
+  for (let i = 0; i < n; i++) {
+    particles.push({ kind:'dust', x: x + rand(-10, 10), y: y + rand(-3, 1),
+      vx: rand(-70, 70), vy: rand(-60, -10),
+      life: rand(.3, .55), t: 0, c: 'rgba(200,180,150,.7)', s: irand(2, 4) });
+  }
+}
 function spawnDmg(x, y, val, color) {
   G.dmgNums.push({ x, y, val, life: 0.8, t: 0, c: color || '#fff4c8', vy: -34 });
 }
@@ -743,7 +833,7 @@ function spawnSuperBurst(x, y) {
       life: rand(.25,.5), t: 0,
       c: colors[irand(0, colors.length-1)], s: irand(3,6) });
   }
-  G.shake = Math.max(G.shake, 5);
+  addTrauma(0.6); G.zoomPunch = Math.max(G.zoomPunch, 0.22); G.impactFlash = Math.max(G.impactFlash, 3);
 }
 
 // 超必杀释放金光（keyframes 样式只注入一次，避免每次释放都追加重复 <style>）
@@ -780,7 +870,9 @@ const G = {
   round: 1,
   wins: { p1: 0, p2: 0 },
   roundCause: '',
-  shake: 0,
+  trauma: 0,        // 震动能量 0–1（trauma² 衰减，横向为主）
+  zoomPunch: 0,     // 重击推镜计时（秒）
+  impactFlash: 0,   // 冲击闪光（帧）
   hitStop: 0,
   projectiles: [],
   comboShow: 0, comboSide: 1, comboT: 0,
@@ -845,7 +937,7 @@ function startRound() {
   G.time = G.training ? Infinity : 60;
   G.winner = null; G.roundCause = '';
   G.pausedFrom = null;
-  G.shake = 0; G.hitStop = 0; G.comboShow = 0; G.comboT = 0;
+  G.trauma = 0; G.zoomPunch = 0; G.impactFlash = 0; G.hitStop = 0; G.comboShow = 0; G.comboT = 0;
   G.slowmo = 1; G.dmgNums = []; G.perfect = false;
   G.introT = 0;
   G.scene = pickScene();
@@ -911,7 +1003,7 @@ function finishRound(winner, cause) {
     G.roundCause = cause;
     G.koTimer = 0;
     G.state = 'training-ko';
-    sfx('ko'); G.shake = 6;
+    sfx('ko'); addTrauma(0.7); G.zoomPunch = 0.3; G.impactFlash = 4;
     return;
   }
   G.roundCause = cause;
@@ -920,11 +1012,11 @@ function finishRound(winner, cause) {
   if (winner === G.p2) G.wins.p2++;
   if (cause === 'ko') {
     G.state = 'ko';
-    sfx('ko'); G.shake = 6; G.slowmo = 0.3;
+    sfx('ko'); addTrauma(0.7); G.zoomPunch = 0.3; G.impactFlash = 4; G.slowmo = 0.3;
     if (winner && winner.hp >= winner.maxHp - 0.5) G.perfect = true; // 满血取胜
   } else {
     G.state = 'timeup';
-    G.shake = 2;
+    addTrauma(0.3);
   }
 }
 
@@ -1023,6 +1115,18 @@ const STARS  = Array.from({ length: 72 }, () => ({ x: _rng() * W, y: _rng() * 11
 const FIREFL = Array.from({ length: 14 }, () => ({ x: 20 + _rng() * (W - 40), y: 120 + _rng() * 90, p: _rng() * 6.28, sp: .6 + _rng() * 1.1, r: 1 + _rng() * 1.4 }));
 
 // 场景上方的动态层：日月光晕 / 飘云 / 闪烁星 / 萤火 / 摆动的旗
+// 前景草叶（浅视差纵深，低成本氛围）
+function drawForegroundFX() {
+  ctx.fillStyle = 'rgba(18,32,18,.9)';
+  for (let i = 0; i < 12; i++) {
+    const bx = ((i * 113 + 37) % (W + 30)) - 15;
+    const sway = Math.sin(gameTime * 1.6 + i * 1.7) * 2;
+    const h = 7 + (i * 5) % 8;
+    ctx.fillRect(bx + sway, H - h, 3, h);
+    ctx.fillRect(bx + sway + 4, H - h + 3, 2, h - 3);
+  }
+}
+
 function drawDynamicBG(t) {
   const sc = SCENES[G.scene] || SCENES.day;
   const night = !!sc.stars;
@@ -1456,7 +1560,7 @@ function frame(now) {
 
   let dt = rawDt;
   if (G.hitStop > 0) { G.hitStop -= rawDt; dt = 0; } // 命中停帧
-  if (G.slowmo < 1) G.slowmo = Math.min(1, G.slowmo + rawDt * 1.6); // 慢动作回升
+  if (G.slowmo < 1) G.slowmo = Math.min(1, G.slowmo + rawDt * 0.85); // 慢动作回升（KO 仪式感约 0.9s）
   if (G.slowmo < 1 && dt > 0) dt *= G.slowmo;
 
   if (G.state === 'vs') {
@@ -1503,7 +1607,9 @@ function frame(now) {
   G.projectiles = G.projectiles.filter(p => p.life > 0 && p.x > -20 && p.x < W + 20);
 
   // 粒子（随慢动作一起减速，强化电影感）
-  for (const pt of particles) { pt.t += dt; pt.x += (pt.vx || 0) * dt; pt.y += (pt.vy || 0) * dt; pt.vy += 300 * dt; }
+  for (const pt of particles) { pt.t += dt; pt.x += (pt.vx || 0) * dt; pt.y += (pt.vy || 0) * dt;
+    if (pt.kind === 'dust') { pt.vx *= Math.pow(.05, dt); pt.vy *= Math.pow(.2, dt); } // 尘土悬浮减速
+    else pt.vy += 300 * dt; }
   particles = particles.filter(pt => pt.t < pt.life);
   // 浮动伤害数字
   for (const d of G.dmgNums) { d.t += dt; d.y += d.vy * dt; d.vy += 70 * dt; }
@@ -1517,7 +1623,9 @@ function frame(now) {
   G.comboT -= rawDt;
   if (G.comboT <= 0) { G.comboShow = 0; G.p1.combo = 0; G.p2.combo = 0; G.p1.comboDmg = 0; G.p2.comboDmg = 0; }
 
-  G.shake = Math.max(0, G.shake - rawDt * 20);
+  G.trauma = Math.max(0, G.trauma - rawDt * 1.5);
+  G.zoomPunch = Math.max(0, G.zoomPunch - rawDt);
+  G.impactFlash = Math.max(0, G.impactFlash - 1);
   render(rawDt);
 }
 
@@ -1530,7 +1638,18 @@ function drawTitleBG() {
 
 function render(dt) {
   ctx.save();
-  if (G.shake > 0) ctx.translate(rand(-G.shake, G.shake), rand(-G.shake, G.shake));
+  // trauma² 震动：平滑正弦噪声替代逐帧纯随机，横向为主（方向性）
+  const tr2 = G.trauma * G.trauma;
+  if (tr2 > 0.0004) {
+    const mag = tr2 * 7; // 480×270 下最大约 7px
+    ctx.translate(Math.sin(gameTime * 91.7) * mag, Math.cos(gameTime * 113.3) * mag * 0.55);
+  }
+  // 重击推镜：1.03–1.06×，ease-out 回正
+  if (G.zoomPunch > 0) {
+    const zp = Math.min(1, G.zoomPunch / 0.3);
+    const zs = 1 + 0.06 * zp * zp;
+    ctx.translate(W / 2, H / 2); ctx.scale(zs, zs); ctx.translate(-W / 2, -H / 2);
+  }
 
   ctx.drawImage(sceneCanvas(), 0, 0);
   drawDynamicBG(gameTime);
@@ -1579,6 +1698,15 @@ function render(dt) {
       } else if (pt.kind === 'star') {
         const s = pt.s * (0.6 + 0.4 * (pt.t / pt.life));
         drawStar(pt.x, pt.y, s, pt.rot || 0, pt.c);
+      } else if (pt.kind === 'arc') {
+        // 踢技方向性弧光：沿出招方向的短弧，加色发光
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.strokeStyle = pt.c; ctx.lineWidth = 3;
+        ctx.beginPath();
+        if (pt.dir > 0) ctx.arc(pt.x, pt.y, pt.r, -1.1, 1.1);
+        else ctx.arc(pt.x, pt.y, pt.r, Math.PI - 1.1, Math.PI + 1.1);
+        ctx.stroke(); ctx.restore();
       } else {
         px(pt.x, pt.y, pt.s, pt.s, pt.c);
       }
@@ -1595,6 +1723,15 @@ function render(dt) {
       ctx.strokeText(d.val, d.x, d.y); ctx.fillText(d.val, d.x, d.y);
     }
     ctx.globalAlpha = 1;
+    // 冲击闪光（重击 / 超必杀 1–4f 全屏提亮）
+    if (G.impactFlash > 0) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.fillStyle = 'rgba(255,244,200,' + (0.30 * Math.min(1, G.impactFlash / 2)).toFixed(3) + ')';
+      ctx.fillRect(-8, -8, W + 16, H + 16); // 覆盖震动/推镜位移边缘
+      ctx.restore();
+    }
+    drawForegroundFX();
   }
 
   // 回合标识与倒计时提示
