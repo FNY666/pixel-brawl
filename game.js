@@ -1,4 +1,12 @@
 // ===== 像素乱斗 PIXEL BRAWL =====
+// 单文件街机格斗（无构建步骤：直接用浏览器打开 index.html 或部署到 GitHub Pages 即可运行）。
+// 刻意保持单文件而非 ES module——file:// 协议下 module 脚本会被 CORS 拦截。
+//
+// 章节速览：
+//   基础（含 PHYS/COMBAT 调参）→ 背景音乐 → 音效 → 键盘输入 → 触屏输入 →
+//   招式表/角色/AI 参数 → Fighter（物理/战斗/AI）→ 特效 → 全局状态与流程 →
+//   场景 → 角色绘制 → HUD → 主循环 → UI 接线/启动（含 debug/autotest 自检）
+//
 'use strict';
 
 // ---------- 基础 ----------
@@ -6,6 +14,30 @@ const W = 480, H = 270, GROUND = 226;
 const cv = document.getElementById('cv');
 const ctx = cv.getContext('2d');
 ctx.imageSmoothingEnabled = false;
+
+// ===== 物理与战斗调参（集中在此，数值与原版一致） =====
+const PHYS = {
+  gravity: 500,      // 重力加速度（px/s²）
+  jumpV: -215,       // 跳跃初速度
+  arenaL: 16,        // 场地左右边界（角色中心钳制范围）
+  get arenaR() { return W - 16; },
+  airJuggleV: -80,   // 空中被击时的上挑速度
+};
+const COMBAT = {
+  guardChip: 0.28,       // 格挡承伤比例
+  comboDecay: 0.09,      // 连段中每多一段的伤害衰减
+  comboDecayMax: 0.5,    // 衰减上限
+  meterOnHitGiven: 14,   // 命中对方获得的能量
+  meterOnHitTaken: 5,    // 被命中获得的能量
+  meterOnGuardGiven: 5,  // 对方格挡时攻击方获得的能量
+  meterOnGuardTaken: 9,  // 格挡成功获得的能量
+  meterRegen: 5,         // 能量自然回复（/秒）
+  chipDrain: 28,         // 残血拖尾消退速度（/秒）
+  atkBufFrames: 25,      // 攻击输入缓冲帧数
+  hitStunTime: 0.32,     // 受击硬直时长（秒）
+  specialCost: 35,       // 波动拳能量消耗
+  pressRecency: 1,       // 键盘按下被识别为"刚按下"的帧窗口
+};
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const rand = (a, b) => a + Math.random() * (b - a);
@@ -89,8 +121,12 @@ function sfx(kind) {
 const input = { left:false, right:false, jump:false, block:false, punch:false, kick:false, special:false };
 const input2 = { left:false, right:false, jump:false, block:false, punch:false, kick:false, special:false };
 // 帧号按下记录：keydown 记当前帧号，update 据此判断"刚按下"（防快速连按丢键）
+// 1P/2P 各用一张表：共用一张会导致同帧内双方同时出拳时后捕获者丢失输入
 let GFRAME = 0;
-const pressFrame = { punch: 0, kick: 0, special: 0 };
+const freshPressMap = () => ({ punch: -999, kick: -999, special: -999,
+  left: -999, right: -999, jump: -999, block: -999 });
+const pressFrame1 = freshPressMap();   // 1P（键盘 ASDW+JKL）
+const pressFrame2 = freshPressMap();   // 2P（键盘 方向键+456）
 // 1P：ASDW + J/K/L；2P：方向键 + 4/5/6
 const KEYMAP = {
   a:'left', d:'right', w:'jump', s:'block',
@@ -102,26 +138,18 @@ const KEYMAP2 = {
 };
 function dispatchKey(e, isDown) {
   const k = e.key.toLowerCase();
-  if (KEYMAP[k]) { input[KEYMAP[k]] = isDown; if (isDown) pressFrame[KEYMAP[k]] = GFRAME; e.preventDefault(); }
-  if (KEYMAP2[k]) { input2[KEYMAP2[k]] = isDown; if (isDown) pressFrame[KEYMAP2[k]] = GFRAME; e.preventDefault(); }
+  if (KEYMAP[k]) { input[KEYMAP[k]] = isDown; if (isDown) pressFrame1[KEYMAP[k]] = GFRAME; e.preventDefault(); }
+  if (KEYMAP2[k]) { input2[KEYMAP2[k]] = isDown; if (isDown) pressFrame2[KEYMAP2[k]] = GFRAME; e.preventDefault(); }
 }
-addEventListener('keydown', e => { dispatchKey(e, true); });
-addEventListener('keyup', e => { dispatchKey(e, false); });
-
+// 键盘：移动/攻击映射 + 全局快捷键（P 暂停 / R 训练复位 / M 静音）
 addEventListener('keydown', e => {
-  if (e.key.toLowerCase() === 'p' && G.state !== 'title' && G.state !== 'result') {
-    togglePause();
-    e.preventDefault();
-  }
-  if (e.key.toLowerCase() === 'r' && G.training && G.state !== 'paused') {
-    resetTrainingPosition();
-    e.preventDefault();
-  }
-  if (e.key.toLowerCase() === 'm') {
-    toggleMute();
-    e.preventDefault();
-  }
+  dispatchKey(e, true);
+  const k = e.key.toLowerCase();
+  if (k === 'p' && G.state !== 'title' && G.state !== 'result') { togglePause(); e.preventDefault(); }
+  else if (k === 'r' && G.training && G.state !== 'paused') { resetTrainingPosition(); e.preventDefault(); }
+  else if (k === 'm') { toggleMute(); e.preventDefault(); }
 });
+addEventListener('keyup', e => { dispatchKey(e, false); });
 
 // 静音开关（音乐 + 音效）
 function toggleMute() {
@@ -235,11 +263,11 @@ function hideTouch() { document.getElementById('touch').classList.add('hidden');
 // ---------- 招式表 ----------
 const ATTACKS = {
   // cancelFrom：命中帧后可被其他攻击取消（参考街霸引擎的可中断窗口）
-  punch:   { dmg:6,  total:.28, activeFrom:.06, activeTo:.14, reach:26, h:14,  kb:70,  stun:.28, cd:.30, oy:-26, combo:true, cancelFrom:.14 },
-  punch2:  { dmg:7,  total:.24, activeFrom:.04, activeTo:.10, reach:30, h:14,  kb:90,  stun:.30, cd:.02, oy:-28, combo:true, cancelFrom:.10 },
-  kick3:   { dmg:12, total:.36, activeFrom:.10, activeTo:.20, reach:34, h:16,  kb:150, stun:.48, cd:.02, oy:-14, last:true, cancelFrom:.20 },
-  kick:    { dmg:10, total:.40, activeFrom:.12, activeTo:.24, reach:32, h:16,  kb:120, stun:.42, cd:.55, oy:-16, cancelFrom:.24 },
-  airpunch:{ dmg:8,  total:.30, activeFrom:.06, activeTo:.14, reach:28, h:14,  kb:90,  stun:.35, cd:.02, oy:-26, air:true },
+  punch:   { dmg:6,  total:.28, activeFrom:.06, activeTo:.14, reach:26, h:14,  kb:70,  cd:.30, oy:-26, combo:true, cancelFrom:.14 },
+  punch2:  { dmg:7,  total:.24, activeFrom:.04, activeTo:.10, reach:30, h:14,  kb:90,  cd:.02, oy:-28, combo:true, cancelFrom:.10 },
+  kick3:   { dmg:12, total:.36, activeFrom:.10, activeTo:.20, reach:34, h:16,  kb:150, cd:.02, oy:-14, last:true, cancelFrom:.20 },
+  kick:    { dmg:10, total:.40, activeFrom:.12, activeTo:.24, reach:32, h:16,  kb:120, cd:.55, oy:-16, cancelFrom:.24 },
+  airpunch:{ dmg:8,  total:.30, activeFrom:.06, activeTo:.14, reach:28, h:14,  kb:90,  cd:.02, oy:-26, air:true },
   special: { dmg:14, total:.50, activeFrom:.22, activeTo:.30, cd:2.2, projectile:true },
   super:   { dmg:30, total:.70, activeFrom:.25, activeTo:.35, cd:3.0, projectile:true, super:true }
 };
@@ -346,7 +374,8 @@ class Fighter {
       aiGuard: 0,
       buf: { punch: 0, kick: 0, special: 0 },
       prev: { punch: false, kick: false, special: false },
-      atkLog: []               // 连段挑战用：最近攻击名序列
+      atkLog: [],               // 连段挑战用：最近攻击名序列
+      press: pressFrame1        // 本玩家的键盘按下帧表（1P/2P 独立，避免互相消费）
     }, opts);
   }
 
@@ -356,15 +385,18 @@ class Fighter {
     return { x: this.x - w/2, y: this.y - (this.type==='blob'?46:48), w: w, h: this.type==='blob'?46:48 };
   }
 
-  // 攻击输入捕获：帧号按下判定（消费式，快速连按不丢）
+  // 攻击输入捕获：两种信号源都进缓冲（快速连按不丢）
+  //  - 键盘：keydown 是异步事件，用帧号判定"刚按下"
+  //  - AI/触屏：输入是同步布尔量，用上升沿判定（原版此处只认键盘，导致 AI/触屏永远发不出招式）
   captureAttackInput(inp) {
+    const pf = this.press;
     for (const k of ['punch', 'kick', 'special']) {
       const cur = !!inp[k];
+      const keyed = cur && GFRAME - pf[k] <= COMBAT.pressRecency;
+      const rising = cur && !this.prev[k];
+      if (keyed || rising) this.buf[k] = COMBAT.atkBufFrames;
+      if (keyed) pf[k] = -999;   // 消费本次键盘按下
       this.prev[k] = cur;
-      if (cur && GFRAME - pressFrame[k] <= 1) {
-        this.buf[k] = 25;
-        pressFrame[k] = -999;   // 消费本次按下
-      }
     }
   }
 
@@ -392,31 +424,31 @@ class Fighter {
     let isSuper = false;
     if (name === 'special' && this.meter >= 100) { name = 'super'; isSuper = true; }
 
-    if (name === 'special' && this.meter < 35) return false;
+    if (name === 'special' && this.meter < COMBAT.specialCost) return false;
     this.blocking = false;
     this.state = 'attack'; this.stateT = 0;
     this.attack = name; this.hitDone = false;
-      this.atkLog.push(name);
+    this.atkLog.push(name);
     if (this.atkLog.length > 8) this.atkLog.shift();
     this.cd[name] = ATTACKS[name].cd;
     if (name === 'special' || name === 'super') {
-      this.meter -= (isSuper ? 100 : 35);
+      this.meter -= (isSuper ? 100 : COMBAT.specialCost);
       sfx(isSuper ? 'super' : 'shot');
       if (isSuper) { goldenFlash(); G.slowmo = 0.32; }
     }
     return true;
   }
 
-  takeHit(dmg, dir, kb, stun, attacker) {
+  takeHit(dmg, dir, kb, attacker) {
     if (this.state === 'ko') return;
     const foeInFront = Math.sign(attacker.x - this.x) === this.facing;
     const guarded = this.blocking && this.onGround && foeInFront && this.state !== 'attack';
     // 连段伤害衰减（真实格斗手感：同一连段越往后单发越轻）
-    const scale = guarded ? 1 : (1 - Math.min(0.5, Math.max(0, attacker.combo - 1) * 0.09));
-    const finalDmg = guarded ? Math.max(1, Math.ceil(dmg * 0.28)) : Math.max(1, Math.round(dmg * scale));
+    const scale = guarded ? 1 : (1 - Math.min(COMBAT.comboDecayMax, Math.max(0, attacker.combo - 1) * COMBAT.comboDecay));
+    const finalDmg = guarded ? Math.max(1, Math.ceil(dmg * COMBAT.guardChip)) : Math.max(1, Math.round(dmg * scale));
     this.hp = Math.max(0, this.hp - finalDmg);
-    attacker.meter = clamp(attacker.meter + (guarded ? 5 : 14), 0, attacker.maxMeter);
-    this.meter = clamp(this.meter + (guarded ? 9 : 5), 0, this.maxMeter);
+    attacker.meter = clamp(attacker.meter + (guarded ? COMBAT.meterOnGuardGiven : COMBAT.meterOnHitGiven), 0, attacker.maxMeter);
+    this.meter = clamp(this.meter + (guarded ? COMBAT.meterOnGuardTaken : COMBAT.meterOnHitTaken), 0, this.maxMeter);
 
     if (guarded) {
       this.state = 'block'; this.stateT = 0;
@@ -438,7 +470,7 @@ class Fighter {
     this.state = 'hit'; this.stateT = 0;
     this.attack = null; this.hitDone = true;
     this.vx = dir * kb;
-    if (!this.onGround) this.vy = -80;
+    if (!this.onGround) this.vy = PHYS.airJuggleV;
     this.flash = .12;
     attacker.combo++;
     attacker.comboDmg += finalDmg;
@@ -457,9 +489,9 @@ class Fighter {
   update(dt, foe, inp) {
     // 冷却与能量自然恢复
     for (const k in this.cd) this.cd[k] = Math.max(0, this.cd[k] - dt);
-    this.meter = clamp(this.meter + dt * 5, 0, this.maxMeter);
+    this.meter = clamp(this.meter + dt * COMBAT.meterRegen, 0, this.maxMeter);
     this.flash = Math.max(0, this.flash - dt);
-    if (this.chipHp > this.hp) this.chipHp = Math.max(this.hp, this.chipHp - dt * 28); // 残血拖尾
+    if (this.chipHp > this.hp) this.chipHp = Math.max(this.hp, this.chipHp - dt * COMBAT.chipDrain); // 残血拖尾
 
     // 胜利姿势：动作展示，不受输入影响
     if (this.state === 'win') {
@@ -469,10 +501,10 @@ class Fighter {
 
     // KO 倒地
     if (this.state === 'ko') {
-      this.vy += 500 * dt;
+      this.vy += PHYS.gravity * dt;
       this.x += this.vx * dt; this.y += this.vy * dt;
       if (this.y > GROUND) { this.y = GROUND; this.vy = 0; this.vx *= .8; }
-      this.x = clamp(this.x, 16, W - 16);
+      this.x = clamp(this.x, PHYS.arenaL, PHYS.arenaR);
       return;
     }
 
@@ -480,12 +512,12 @@ class Fighter {
     if (this.state === 'hit') {
       this.captureAttackInput(inp);
       this.stateT += dt;
-      this.vy += 500 * dt;
+      this.vy += PHYS.gravity * dt;
       this.x += this.vx * dt; this.y += this.vy * dt;
       if (this.y > GROUND) { this.y = GROUND; this.vy = 0; }
       this.vx *= Math.pow(.02, dt);
-      this.x = clamp(this.x, 16, W - 16);
-      if (this.stateT > .32 && this.onGround) { this.state = 'idle'; this.stateT = 0; }
+      this.x = clamp(this.x, PHYS.arenaL, PHYS.arenaR);
+      if (this.stateT > COMBAT.hitStunTime && this.onGround) { this.state = 'idle'; this.stateT = 0; }
       return;
     }
 
@@ -493,11 +525,11 @@ class Fighter {
     if (this.state === 'block') {
       this.stateT += dt;
       this.blocking = !!inp.block && this.onGround;
-      this.vy += 500 * dt;
+      this.vy += PHYS.gravity * dt;
       this.x += this.vx * dt; this.y += this.vy * dt;
       if (this.y > GROUND) { this.y = GROUND; this.vy = 0; }
       this.vx *= Math.pow(.01, dt);
-      this.x = clamp(this.x, 16, W - 16);
+      this.x = clamp(this.x, PHYS.arenaL, PHYS.arenaR);
       if (!this.blocking) { this.state = 'idle'; this.stateT = 0; }
       return;
     }
@@ -509,25 +541,24 @@ class Fighter {
 
       // —— 可取消窗口（街霸引擎取消语义）：activeTo 之后可按其他攻击/波动取消 ——
       if (a.cancelFrom !== undefined && this.stateT >= a.cancelFrom) {
-        // 边沿检测：攻击键用"刚按下"（帧号判定）而非"按住"
+        // 边沿检测：键盘用帧号判定，AI/触屏用上升沿
         const edge = (k, v) => {
           const cur = !!v;
+          const keyed = cur && GFRAME - this.press[k] <= COMBAT.pressRecency;
+          const rising = cur && !this.prev[k];
           this.prev[k] = cur;
-          if (cur && GFRAME - pressFrame[k] <= 1) {
-            pressFrame[k] = -999;   // 消费本次按下（取消路径）
-            return true;
-          }
-          return false;
+          if (keyed) this.press[k] = -999;   // 消费本次按下（取消路径）
+          return keyed || rising;
         };
         const kickP = edge('kick', inp.kick) && this.cd.kick <= 0;
-        const specialP = edge('special', inp.special) && this.meter >= 35;
+        const specialP = edge('special', inp.special) && this.meter >= COMBAT.specialCost;
         const punchP = edge('punch', inp.punch);
         if (kickP) { this.attack = 'kick'; this.stateT = 0; this.hitDone = false; this.cd.kick = ATTACKS.kick.cd; sfx('block'); this.atkLog.push('kick'); }
         else if (specialP) {
           const sup = this.meter >= 100;
           this.attack = sup ? 'super' : 'special'; this.stateT = 0; this.hitDone = false;
           this.cd.special = ATTACKS[this.attack].cd;
-          this.meter -= sup ? 100 : 35;
+          this.meter -= sup ? 100 : COMBAT.specialCost;
           sfx(sup ? 'super' : 'shot');
           if (sup) { goldenFlash(); G.slowmo = 0.32; }
           this.atkLog.push(this.attack);
@@ -566,7 +597,7 @@ class Fighter {
           if (hb.x < fb.x + fb.w && hb.x + hb.w > fb.x && hb.y < fb.y + fb.h && hb.y + hb.h > fb.y) {
             this.hitDone = true;
             const dmg = Math.round(a.dmg * this.dmg);
-            foe.takeHit(dmg, this.facing, a.kb, a.stun, this);
+            foe.takeHit(dmg, this.facing, a.kb, this);
             if (a.last && foe.state !== 'ko') { foe.vy = -90; foe.vx = this.facing * 110; } // 终结踢上挑
           }
         }
@@ -574,12 +605,11 @@ class Fighter {
       if (this.stateT >= a.total) { this.state = this.onGround ? 'idle' : 'jump'; this.stateT = 0; this.attack = null; }
       // 攻击时轻微前移
       if (this.onGround) this.vx *= Math.pow(.01, dt);
-      this.x = clamp(this.x + this.vx * dt, 16, W - 16);
+      this.x = clamp(this.x + this.vx * dt, PHYS.arenaL, PHYS.arenaR);
       return;
     }
 
     // ---- 常规控制（玩家输入 或 AI 虚拟输入）----
-    const JUMP = -215;
     let move = 0;
     if (inp.left) move -= 1;
     if (inp.right) move += 1;
@@ -591,7 +621,7 @@ class Fighter {
       return;
     }
     this.blocking = false;
-    if (inp.jump && this.onGround) { this.vy = JUMP; sfx('jump'); }
+    if (inp.jump && this.onGround) { this.vy = PHYS.jumpV; sfx('jump'); }
 
     // 攻击输入：边沿捕获 + 缓冲消费（可行动立即出手，不可行则暂存）
     this.captureAttackInput(inp);
@@ -602,7 +632,7 @@ class Fighter {
       }
     }
 
-    this.vy += 500 * dt;
+    this.vy += PHYS.gravity * dt;
     this.x += move * this.speed * dt;
     this.y += this.vy * dt;
     if (this.y > GROUND) { this.y = GROUND; this.vy = 0; }
@@ -612,14 +642,14 @@ class Fighter {
 
     // 面向对手
     if (foe && this.state !== 'attack') this.facing = foe.x >= this.x ? 1 : -1;
-    this.x = clamp(this.x, 16, W - 16);
+    this.x = clamp(this.x, PHYS.arenaL, PHYS.arenaR);
 
     // 身体碰撞推挤
     if (foe) {
       const dx = this.x - foe.x;
       if (Math.abs(dx) < 22 && Math.abs(this.y - foe.y) < 40 && dx !== 0) {
         const push = (22 - Math.abs(dx)) / 2 * Math.sign(dx);
-        this.x = clamp(this.x + push, 16, W - 16);
+        this.x = clamp(this.x + push, PHYS.arenaL, PHYS.arenaR);
       }
     }
   }
@@ -642,6 +672,7 @@ class Fighter {
       this.aiMove = 0; this.aiAct = null;
       const r = Math.random();
       // 行为概率：性格权重累积成阈值（approach / jump / special / retreat）
+      // 距离分三档：远 >110（接近/发波/跳）· 中 46–110（接近/跳/波/后撤）· 近 <46（拳/脚/格挡/后撤）
       const seek = per.approach, sp = seek + per.special, jp = sp + per.jump;
       if (dist > 110) {
         if (r < seek) this.aiMove = Math.sign(foe.x - this.x);
@@ -715,14 +746,18 @@ function spawnSuperBurst(x, y) {
   G.shake = Math.max(G.shake, 5);
 }
 
-// 超必杀释放金光
+// 超必杀释放金光（keyframes 样式只注入一次，避免每次释放都追加重复 <style>）
 function goldenFlash() {
+  if (!document.getElementById('gold-style')) {
+    const st = document.createElement('style');
+    st.id = 'gold-style';
+    st.textContent = '@keyframes goldfade{from{opacity:1}to{opacity:0}}';
+    document.head.appendChild(st);
+  }
   const el = document.createElement('div');
   el.style.cssText = 'position:fixed;inset:0;z-index:30;pointer-events:none;' +
     'background:radial-gradient(ellipse at center,rgba(255,240,150,.85),rgba(255,180,40,.35) 45%,transparent 75%);' +
     'animation:goldfade .5s ease-out forwards;';
-  document.head.appendChild(document.createElement('style')).textContent =
-    '@keyframes goldfade{from{opacity:1}to{opacity:0}}';
   document.body.appendChild(el);
   setTimeout(() => el.remove(), 520);
 }
@@ -804,8 +839,8 @@ function startRound() {
     else startBGM('battle');
   }
   const p2c = CHARACTERS[p2Type];
-  G.p1 = new Fighter({ x: 140, facing: 1, type: G.playerType, name: p1c.name, hp: p1c.hp, isAI: false });
-  G.p2 = new Fighter({ x: 340, facing: -1, type: p2Type, name: p2c.name, hp: p2c.hp + hpBoost, isAI: true, aiScale, persona });
+  G.p1 = new Fighter({ x: 140, facing: 1, type: G.playerType, name: p1c.name, hp: p1c.hp, isAI: false, press: pressFrame1 });
+  G.p2 = new Fighter({ x: 340, facing: -1, type: p2Type, name: p2c.name, hp: p2c.hp + hpBoost, isAI: true, aiScale, persona, press: pressFrame2 });
   G.projectiles = []; particles = [];
   G.time = G.training ? Infinity : 60;
   G.winner = null; G.roundCause = '';
@@ -1461,7 +1496,7 @@ function frame(now) {
     const fb = foe.hurtbox;
     if (foe.state !== 'ko' && p.x + p.r > fb.x && p.x - p.r < fb.x + fb.w && p.y + p.r > fb.y && p.y - p.r < fb.y + fb.h) {
       if (p.super) spawnSuperBurst(fb.x + fb.w/2, fb.y + fb.h/2);
-      foe.takeHit(p.dmg, Math.sign(p.vx), 130, .45, p.owner);
+      foe.takeHit(p.dmg, Math.sign(p.vx), 130, p.owner);
       p.life = 0;
     }
   }
